@@ -1,7 +1,7 @@
 require("dotenv").config();
 
 const express = require("express");
-const sqlite3 = require("sqlite3").verbose();
+const Database = require("better-sqlite3");
 const bcrypt = require("bcrypt");
 const session = require("express-session");
 const { body, validationResult } = require("express-validator");
@@ -14,11 +14,13 @@ app.use(express.json());
 
 app.use(
     session({
-        secret: process.env.SESSION_SECRET,
+        secret: process.env.SESSION_SECRET || "secretkey",
         resave: false,
         saveUninitialized: false,
         cookie: {
             httpOnly: true,
+            secure: false,
+            sameSite: "strict",
             maxAge: 1000 * 60 * 60
         }
     })
@@ -26,21 +28,22 @@ app.use(
 
 app.use(express.static("public"));
 
-const db = new sqlite3.Database("database.db");
+const db = new Database("database.db");
 
-db.run(`
+db.prepare(`
 CREATE TABLE IF NOT EXISTS users(
-id INTEGER PRIMARY KEY AUTOINCREMENT,
-username TEXT UNIQUE,
-email TEXT UNIQUE,
-password TEXT
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  username TEXT UNIQUE,
+  email TEXT UNIQUE,
+  password TEXT
 )
-`);
+`).run();
 
 function isAuthenticated(req, res, next) {
     if (req.session.userId) {
         return next();
     }
+
     res.redirect("/login");
 }
 
@@ -78,47 +81,52 @@ app.post(
         try {
             const hashedPassword = await bcrypt.hash(password, 12);
 
-            db.run(
-                "INSERT INTO users(username,email,password) VALUES(?,?,?)", [username, email, hashedPassword],
-                function(err) {
-                    if (err) {
-                        return res.send("User already exists");
-                    }
-
-                    res.redirect("/login");
-                }
+            const stmt = db.prepare(
+                "INSERT INTO users(username,email,password) VALUES(?,?,?)"
             );
-        } catch {
-            res.send("Error");
+
+            stmt.run(username, email, hashedPassword);
+
+            res.redirect("/login");
+
+        } catch (err) {
+            res.send("User already exists");
         }
     }
 );
 
-app.post("/login", (req, res) => {
+app.post("/login", async(req, res) => {
     const { email, password } = req.body;
 
-    db.get(
-        "SELECT * FROM users WHERE email=?", [email],
-        async(err, user) => {
-            if (!user) {
-                return res.send("Invalid Credentials");
-            }
+    try {
 
-            const match = await bcrypt.compare(
-                password,
-                user.password
-            );
+        const stmt = db.prepare(
+            "SELECT * FROM users WHERE email=?"
+        );
 
-            if (!match) {
-                return res.send("Invalid Credentials");
-            }
+        const user = stmt.get(email);
 
-            req.session.userId = user.id;
-            req.session.username = user.username;
-
-            res.redirect("/dashboard");
+        if (!user) {
+            return res.send("Invalid Credentials");
         }
-    );
+
+        const match = await bcrypt.compare(
+            password,
+            user.password
+        );
+
+        if (!match) {
+            return res.send("Invalid Credentials");
+        }
+
+        req.session.userId = user.id;
+        req.session.username = user.username;
+
+        res.redirect("/dashboard");
+
+    } catch (err) {
+        res.send("Server Error");
+    }
 });
 
 app.get("/logout", (req, res) => {
